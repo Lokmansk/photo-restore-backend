@@ -3,4 +3,4 @@ uvicorn[standard]==0.30.1
 replicate==0.31.0
 httpx==0.27.0
 python-multipart==0.0.9
-Pillow==10.3.0
+Pillow==10.4.0
