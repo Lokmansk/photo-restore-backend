@@ -2,9 +2,26 @@ services:
   - type: web
     name: photo-restore-api
     runtime: python
+    pythonVersion: "3.11.9"
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: REPLICATE_API_TOKEN
-        sync: false   # Set this manually in Render dashboard (secret)
+        sync: false
     autoDeploy: true
+```
+
+Click **Commit changes**.
+
+---
+
+### Also update `requirements.txt` — use newer replicate
+
+The `replicate==0.31.0` package also has a Pydantic v1 issue. Edit `requirements.txt` on GitHub and replace with:
+```
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+replicate==0.34.1
+httpx==0.27.0
+python-multipart==0.0.9
+Pillow==10.4.0
