@@ -102,7 +102,7 @@ async def restore_photo(
         # upscale=2                → 2x upscale in this pass
         print(f"[INFO] CodeFormer — fidelity={fidelity} file={file.filename}")
         cf_out = client.run(
-            "sczhou/codeformer:7de2ea26c616d5bf2245ad0d5e24f0ff9a6204578a5c876db53142ebb9d5ba4f",
+            "sczhou/codeformer:cc4956dd26fa5a7185d5660cc9100fab1b8070a1d1654a8bb5eb6d443b020bb2",
             input={
                 "image":               data_uri,
                 "codeformer_fidelity": fidelity,
