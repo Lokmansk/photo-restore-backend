@@ -1,24 +1,27 @@
 """
-PhotoRestore API — v2.1
-Pipeline:
-  /restore      → CodeFormer 2x (face + hair + background) + Real-ESRGAN 2x (full image) = 4x total
-  /portrait     → CodeFormer 4x only (faster, identity-preserving, best for selfies)
-  /enhance-only → Real-ESRGAN 4x only (landscapes, full body, no-face photos)
+PhotoRestore API — v3.0  (FREE — No API key needed)
+Uses FREE public HuggingFace Spaces via gradio_client:
+  /restore      → GFPGAN v1.4 (face + hair + background) — FREE
+  /portrait     → GFPGAN v1.4 higher fidelity — FREE
+  /enhance-only → GFPGAN without face-specific pass — FREE
 """
 
 import os
 import base64
 import httpx
-import replicate
+import tempfile
+import shutil
+from pathlib import Path
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from gradio_client import Client, handle_file
 import uvicorn
 
 app = FastAPI(
     title="PhotoRestore API",
-    description="Full-image AI restoration: face, hair, background, full body, upscale",
-    version="2.1.0"
+    description="Free AI photo restoration via HuggingFace Spaces",
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -28,41 +31,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-REPLICATE_API_TOKEN = os.environ.get("REPLICATE_API_TOKEN", "")
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
-# ── Model version hashes ────────────────────────────────────────────
-CODEFORMER  = "sczhou/codeformer:cc4956dd26fa5a7185d5660cc9100fab1b8070a1d1654a8bb5eb6d443b020bb2"
-REAL_ESRGAN = "nightmareai/real-esrgan:f121d640bd286e1fdc67f9799164c1d5be36ff74576ee11c803ae5b665dd46aa"
+# Free HuggingFace Space — GFPGAN by original authors (Xintao/Tencent ARC)
+HF_SPACE_GFPGAN = "Xintao/GFPGAN"
 
 
 # ── Shared helpers ──────────────────────────────────────────────────
-
-def _make_data_uri(contents: bytes, mime: str) -> str:
-    return f"data:{mime};base64,{base64.b64encode(contents).decode()}"
-
-
-async def _fetch_url(url: str) -> bytes:
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        r = await client.get(url)
-        r.raise_for_status()
-        return r.content
-
 
 def _validate(file: UploadFile, contents: bytes):
     if file.content_type not in ["image/jpeg", "image/jpg", "image/png", "image/webp"]:
         raise HTTPException(400, "Invalid file type. Use JPEG, PNG, or WEBP.")
     if len(contents) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(413, "File too large. Max 10 MB.")
-    if not REPLICATE_API_TOKEN:
-        raise HTTPException(500, "REPLICATE_API_TOKEN not set on server.")
+
+
+def _bytes_to_base64(path: str) -> str:
+    with open(path, "rb") as f:
+        return base64.b64encode(f.read()).decode()
+
+
+def _save_upload_to_temp(contents: bytes, suffix: str = ".jpg") -> str:
+    """Save uploaded bytes to a temp file and return the path."""
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(contents)
+    tmp.close()
+    return tmp.name
 
 
 # ── Routes ──────────────────────────────────────────────────────────
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "version": "2.1.0", "message": "PhotoRestore API running"}
+    return {"status": "ok", "version": "3.0.0", "message": "PhotoRestore API running (FREE via HuggingFace)"}
 
 
 @app.get("/health")
@@ -76,72 +77,57 @@ async def restore_photo(
     fidelity: float = Form(default=0.5)
 ):
     """
-    FULL RESTORE — Best for old/damaged/pixelated photos with faces.
-
-    Pipeline:
-      Step 1 → CodeFormer 2x : restores face, hair strands, skin, background
-      Step 2 → Real-ESRGAN 2x: sharpens full image (body, clothes, background)
-      Total  → 4x upscale
-
-    fidelity (0.0 to 1.0):
-      0.2 = very old / heavily damaged photos
-      0.5 = balanced — good for most photos  (default)
-      0.7 = modern photos — preserve identity
+    FULL RESTORE — Face + hair + background using GFPGAN (FREE).
+    Best for old/damaged/pixelated photos.
     """
     contents = await file.read()
     _validate(file, contents)
-    fidelity = max(0.0, min(1.0, fidelity))
-    data_uri = _make_data_uri(contents, file.content_type or "image/jpeg")
-    client = replicate.Client(api_token=REPLICATE_API_TOKEN)
+
+    # Determine file extension
+    ext = ".jpg"
+    if file.content_type == "image/png":
+        ext = ".png"
+    elif file.content_type == "image/webp":
+        ext = ".webp"
+
+    tmp_input = _save_upload_to_temp(contents, suffix=ext)
 
     try:
-        # ── Step 1: CodeFormer ──────────────────────────────────────
-        print(f"[INFO] /restore — CodeFormer fidelity={fidelity} file={file.filename}")
-        cf_out = client.run(
-            CODEFORMER,
-            input={
-                "image":               data_uri,
-                "codeformer_fidelity": fidelity,
-                "background_enhance":  True,   # sharpen background
-                "face_upsample":       True,   # recover hair + skin detail
-                "upscale":             2,      # 2x in this pass
-            }
-        )
-        cf_bytes = await _fetch_url(str(cf_out))
-        print(f"[INFO] CodeFormer done — {len(cf_bytes):,} bytes")
+        print(f"[INFO] /restore — GFPGAN via HuggingFace Space file={file.filename}")
+        client = Client(HF_SPACE_GFPGAN)
 
-        # ── Step 2: Real-ESRGAN ─────────────────────────────────────
-        print("[INFO] Real-ESRGAN full image upscale...")
-        esrgan_out = client.run(
-            REAL_ESRGAN,
-            input={
-                "image":        _make_data_uri(cf_bytes, "image/png"),
-                "scale":        2,       # another 2x = 4x total
-                "face_enhance": True,    # extra face/hair pass
-            }
+        # Call the GFPGAN Space
+        # Parameters: img, version, scale
+        result = client.predict(
+            img=handle_file(tmp_input),
+            version="v1.4",      # best version — face + hair + background
+            scale=2,             # 2x upscale
+            api_name="/predict"
         )
-        final_bytes = await _fetch_url(str(esrgan_out))
-        print(f"[INFO] Done — {len(final_bytes):,} bytes (4x total)")
+
+        # Result is a tuple: (restored_img_path, original_img_path)
+        # or just a path string depending on Space version
+        if isinstance(result, (list, tuple)):
+            output_path = result[0]
+        else:
+            output_path = result
+
+        result_b64 = _bytes_to_base64(output_path)
+        print(f"[INFO] Restore done — output: {output_path}")
 
         return JSONResponse({
-            "success":             True,
-            "image_base64":        base64.b64encode(final_bytes).decode(),
-            "mime_type":           "image/png",
-            "pipeline":            "codeformer-2x + real-esrgan-2x = 4x",
-            "original_size_bytes": len(contents),
-            "restored_size_bytes": len(final_bytes),
-            "upscale_factor":      4,
+            "success":        True,
+            "image_base64":   result_b64,
+            "mime_type":      "image/png",
+            "pipeline":       "gfpgan-v1.4-free",
+            "upscale_factor": 2,
         })
 
-    except replicate.exceptions.ReplicateError as e:
-        print(f"[ERROR] Replicate: {e}")
-        raise HTTPException(502, f"AI processing failed: {e}")
-    except httpx.HTTPError as e:
-        print(f"[ERROR] HTTP: {e}")
-        raise HTTPException(502, "Failed to retrieve image from AI service.")
     except Exception as e:
-        print(f"[ERROR] Unexpected: {e}")
-        raise HTTPException(500, f"Internal error: {e}")
+        print(f"[ERROR] /restore failed: {e}")
+        raise HTTPException(502, f"AI processing failed: {str(e)}")
+    finally:
+        Path(tmp_input).unlink(missing_ok=True)
 
 
 @app.post("/portrait")
@@ -150,93 +136,99 @@ async def restore_portrait(
     fidelity: float = Form(default=0.7)
 ):
     """
-    PORTRAIT MODE — Best for modern selfies / close-up portraits.
-    Faster than Full Restore (single pass).
-    Higher default fidelity (0.7) preserves face identity.
-
-    Pipeline:
-      Step 1 → CodeFormer 4x only: face + hair + skin + background in one pass
+    PORTRAIT MODE — GFPGAN 4x upscale (FREE).
+    Best for modern selfies / close-up portraits.
     """
     contents = await file.read()
     _validate(file, contents)
-    fidelity = max(0.0, min(1.0, fidelity))
-    data_uri = _make_data_uri(contents, file.content_type or "image/jpeg")
-    client = replicate.Client(api_token=REPLICATE_API_TOKEN)
+
+    ext = ".jpg"
+    if file.content_type == "image/png":
+        ext = ".png"
+
+    tmp_input = _save_upload_to_temp(contents, suffix=ext)
 
     try:
-        print(f"[INFO] /portrait — CodeFormer fidelity={fidelity} file={file.filename}")
-        out = client.run(
-            CODEFORMER,
-            input={
-                "image":               data_uri,
-                "codeformer_fidelity": fidelity,
-                "background_enhance":  True,
-                "face_upsample":       True,
-                "upscale":             4,   # 4x in one pass — fast
-            }
+        print(f"[INFO] /portrait — GFPGAN 4x file={file.filename}")
+        client = Client(HF_SPACE_GFPGAN)
+
+        result = client.predict(
+            img=handle_file(tmp_input),
+            version="v1.4",
+            scale=4,             # 4x upscale for portrait
+            api_name="/predict"
         )
-        final_bytes = await _fetch_url(str(out))
-        print(f"[INFO] Portrait done — {len(final_bytes):,} bytes")
+
+        if isinstance(result, (list, tuple)):
+            output_path = result[0]
+        else:
+            output_path = result
+
+        result_b64 = _bytes_to_base64(output_path)
+        print(f"[INFO] Portrait done")
 
         return JSONResponse({
-            "success":             True,
-            "image_base64":        base64.b64encode(final_bytes).decode(),
-            "mime_type":           "image/png",
-            "pipeline":            "codeformer-portrait-4x",
-            "original_size_bytes": len(contents),
-            "restored_size_bytes": len(final_bytes),
-            "upscale_factor":      4,
+            "success":        True,
+            "image_base64":   result_b64,
+            "mime_type":      "image/png",
+            "pipeline":       "gfpgan-v1.4-portrait-4x-free",
+            "upscale_factor": 4,
         })
 
-    except replicate.exceptions.ReplicateError as e:
-        print(f"[ERROR] Replicate: {e}")
-        raise HTTPException(502, f"AI processing failed: {e}")
     except Exception as e:
-        print(f"[ERROR] Unexpected: {e}")
-        raise HTTPException(500, f"Internal error: {e}")
+        print(f"[ERROR] /portrait failed: {e}")
+        raise HTTPException(502, f"AI processing failed: {str(e)}")
+    finally:
+        Path(tmp_input).unlink(missing_ok=True)
 
 
 @app.post("/enhance-only")
 async def enhance_only(file: UploadFile = File(...)):
     """
-    ENHANCE ONLY — Best for full body photos, landscapes, animals, objects.
-    No face-specific processing — sharpens the ENTIRE image equally.
-
-    Pipeline:
-      Step 1 → Real-ESRGAN 4x: whole image super-resolution
+    ENHANCE ONLY — GFPGAN 4x for full body / landscapes (FREE).
+    Uses RestoreFormer for more natural enhancement without face hallucination.
     """
     contents = await file.read()
     _validate(file, contents)
-    data_uri = _make_data_uri(contents, file.content_type or "image/jpeg")
-    client = replicate.Client(api_token=REPLICATE_API_TOKEN)
+
+    ext = ".jpg"
+    if file.content_type == "image/png":
+        ext = ".png"
+
+    tmp_input = _save_upload_to_temp(contents, suffix=ext)
 
     try:
-        print(f"[INFO] /enhance-only — Real-ESRGAN 4x file={file.filename}")
-        out = client.run(
-            REAL_ESRGAN,
-            input={
-                "image":        data_uri,
-                "scale":        4,
-                "face_enhance": False,  # pure image upscale, no face bias
-            }
+        print(f"[INFO] /enhance-only — GFPGAN RestoreFormer file={file.filename}")
+        client = Client(HF_SPACE_GFPGAN)
+
+        result = client.predict(
+            img=handle_file(tmp_input),
+            version="RestoreFormer",  # better for full body / non-face focus
+            scale=4,
+            api_name="/predict"
         )
-        final_bytes = await _fetch_url(str(out))
-        print(f"[INFO] Enhance done — {len(final_bytes):,} bytes")
+
+        if isinstance(result, (list, tuple)):
+            output_path = result[0]
+        else:
+            output_path = result
+
+        result_b64 = _bytes_to_base64(output_path)
+        print(f"[INFO] Enhance done")
 
         return JSONResponse({
             "success":        True,
-            "image_base64":   base64.b64encode(final_bytes).decode(),
+            "image_base64":   result_b64,
             "mime_type":      "image/png",
-            "pipeline":       "real-esrgan-4x",
+            "pipeline":       "restoreformer-4x-free",
             "upscale_factor": 4,
         })
 
-    except replicate.exceptions.ReplicateError as e:
-        print(f"[ERROR] Replicate: {e}")
-        raise HTTPException(502, f"AI processing failed: {e}")
     except Exception as e:
-        print(f"[ERROR] Unexpected: {e}")
-        raise HTTPException(500, str(e))
+        print(f"[ERROR] /enhance-only failed: {e}")
+        raise HTTPException(502, f"AI processing failed: {str(e)}")
+    finally:
+        Path(tmp_input).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
