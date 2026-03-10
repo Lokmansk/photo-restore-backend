@@ -101,6 +101,7 @@ async def restore_photo(
         # face_upsample=True       → recovers fine hair strands + skin pores
         # upscale=2                → 2x upscale in this pass
         print(f"[INFO] CodeFormer — fidelity={fidelity} file={file.filename}")
+        print(f"[INFO] CodeFormer — fidelity={fidelity} file={file.filename}")
         cf_out = client.run(
             "sczhou/codeformer:cc4956dd26fa5a7185d5660cc9100fab1b8070a1d1654a8bb5eb6d443b020bb2",
             input={
@@ -108,79 +109,17 @@ async def restore_photo(
                 "codeformer_fidelity": fidelity,
                 "background_enhance":  True,
                 "face_upsample":       True,
-                "upscale":             2,
+                "upscale":             4,
             }
         )
-        cf_bytes = await _fetch_url(str(cf_out))
-        print(f"[INFO] CodeFormer done — {len(cf_bytes):,} bytes")
-
-        # ── STEP 2: Real-ESRGAN final pass ──────────────────────────────
-        # Adds another 2x sharpening + upscale across the whole image.
-        # face_enhance=True here adds a third pass of hair/face refinement.
-        print("[INFO] Real-ESRGAN final upscale pass...")
-        esrgan_out = client.run(
-            "nightmareai/real-esrgan:f121d640bd286e1fdc67f9799164c1d5be36ff74576ee2d96b1a3a1ddbbe7751",
-            input={
-                "image":        _make_data_uri(cf_bytes, "image/png"),
-                "scale":        2,
-                "face_enhance": True,
-            }
-        )
-        final_bytes = await _fetch_url(str(esrgan_out))
-        print(f"[INFO] Pipeline done — final {len(final_bytes):,} bytes (4x upscale)")
+        final_bytes = await _fetch_url(str(cf_out))
+        print(f"[INFO] Done — {len(final_bytes):,} bytes")
 
         return JSONResponse({
             "success":             True,
             "image_base64":        base64.b64encode(final_bytes).decode(),
             "mime_type":           "image/png",
-            "pipeline":            "codeformer + real-esrgan",
-            "original_size_bytes": len(contents),
-            "restored_size_bytes": len(final_bytes),
-            "upscale_factor":      4,
-        })
-
-    except replicate.exceptions.ReplicateError as e:
-        raise HTTPException(502, f"AI processing failed: {e}")
-    except httpx.HTTPError as e:
-        raise HTTPException(502, "Failed to retrieve image from AI service.")
-    except Exception as e:
-        raise HTTPException(500, f"Internal error: {e}")
-
-
-@app.post("/portrait")
-async def restore_portrait(
-    file: UploadFile = File(...),
-    fidelity: float = Form(default=0.7)
-):
-    """
-    PORTRAIT mode — faster, identity-preserving single CodeFormer pass.
-    Best for: modern selfies / portraits that need hair + skin detail sharpening.
-    Higher default fidelity (0.7) keeps the person's face recognisable.
-    """
-    contents = await file.read()
-    _validate(file, contents)
-    fidelity = max(0.0, min(1.0, fidelity))
-    data_uri = _make_data_uri(contents, file.content_type or "image/jpeg")
-    client = replicate.Client(api_token=REPLICATE_API_TOKEN)
-
-    try:
-        print(f"[INFO] Portrait mode — fidelity={fidelity}")
-        out = client.run(
-            "sczhou/codeformer:7de2ea26c616d5bf2245ad0d5e24f0ff9a6204578a5c876db53142ebb9d5ba4f",
-            input={
-                "image":               data_uri,
-                "codeformer_fidelity": fidelity,
-                "background_enhance":  True,
-                "face_upsample":       True,
-                "upscale":             4,   # 4x in one pass — fast for portraits
-            }
-        )
-        final_bytes = await _fetch_url(str(out))
-        return JSONResponse({
-            "success":             True,
-            "image_base64":        base64.b64encode(final_bytes).decode(),
-            "mime_type":           "image/png",
-            "pipeline":            "codeformer-portrait",
+            "pipeline":            "codeformer-4x",
             "original_size_bytes": len(contents),
             "restored_size_bytes": len(final_bytes),
             "upscale_factor":      4,
